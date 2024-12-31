@@ -5,6 +5,22 @@ set -e
 CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
 VERSION="0.7.7"
 
+# Parse command line arguments
+FORCE_DOWNLOAD=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --force-download)
+            FORCE_DOWNLOAD=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--force-download]"
+            exit 1
+            ;;
+    esac
+done
+
 # Get the actual user when script is run with sudo
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
@@ -47,6 +63,29 @@ check_7z() {
     fi
 }
 
+# Function to setup NVM and Node
+setup_node() {
+    # Source NVM if it exists
+    [ -s "$REAL_HOME/.nvm/nvm.sh" ] && \. "$REAL_HOME/.nvm/nvm.sh"
+    
+    if command -v nvm &> /dev/null; then
+        echo "✓ NVM found, using it for Node.js management"
+        # Install and use the LTS version
+        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && nvm install --lts && nvm use --lts'
+    else
+        echo "NVM not found, installing node via pacman..."
+        pacman -S --noconfirm nodejs npm nodejs-lts-hydrogen
+    fi
+    
+    # Install global npm packages
+    if ! npm list -g electron > /dev/null 2>&1; then
+        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && npm install -g electron'
+    fi
+    if ! npm list -g asar > /dev/null 2>&1; then
+        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && npm install -g asar'
+    fi
+}
+
 # Install dependencies
 echo "Checking dependencies..."
 DEPS_TO_INSTALL=""
@@ -57,7 +96,6 @@ declare -A package_map=(
     ["wrestool"]="icoutils"
     ["icotool"]="icoutils"
     ["convert"]="imagemagick"
-    ["npx"]="nodejs npm"
 )
 
 # Check for 7z
@@ -70,7 +108,7 @@ if ! check_7z; then
 fi
 
 # Check other dependencies
-for cmd in wget wrestool icotool convert npx; do
+for cmd in wget wrestool icotool convert; do
     if ! check_command "$cmd"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL ${package_map[$cmd]}"
     fi
@@ -83,51 +121,46 @@ if [ ! -z "$DEPS_TO_INSTALL" ]; then
     echo "System dependencies installed successfully"
 fi
 
-# Install electron globally via npm if not present
-if ! check_command "electron"; then
-    echo "Installing electron via npm..."
-    npm install -g electron
-    if ! check_command "electron"; then
-        echo "Failed to install electron. Please install it manually:"
-        echo "sudo npm install -g electron"
-        exit 1
-    fi
-    echo "Electron installed successfully"
-fi
-
-# Install asar if needed
-if ! npm list -g asar > /dev/null 2>&1; then
-    echo "Installing asar package globally..."
-    npm install -g asar
-fi
+# Setup Node.js environment
+setup_node
 
 # Create working directories
 WORK_DIR="$(pwd)/build"
 PKG_ROOT="$WORK_DIR/pkg"
 INSTALL_DIR="$PKG_ROOT/usr"
+CACHE_DIR="$(pwd)/cache"
 
-# Clean previous build and ensure proper permissions
-echo "Cleaning previous build..."
+# Clean previous build but keep cache
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 mkdir -p "$INSTALL_DIR/lib/claude-desktop"
 mkdir -p "$INSTALL_DIR/share/applications"
 mkdir -p "$INSTALL_DIR/share/icons"
 mkdir -p "$INSTALL_DIR/bin"
+mkdir -p "$CACHE_DIR"
 
-# Set permissions for build directory
+# Set permissions
 chown -R "$REAL_USER:$REAL_USER" "$WORK_DIR"
+chown -R "$REAL_USER:$REAL_USER" "$CACHE_DIR"
 
 # Function to run commands as the real user
 run_as_user() {
     sudo -u "$REAL_USER" "$@"
 }
 
-# Download and process as real user
+# Download logic with caching
+CACHED_EXE="$CACHE_DIR/Claude-Setup-x64.exe"
+if [[ "$FORCE_DOWNLOAD" = true ]] || [[ ! -f "$CACHED_EXE" ]]; then
+    echo "📥 Downloading Claude Desktop installer..."
+    run_as_user wget -O "$CACHED_EXE" "$CLAUDE_DOWNLOAD_URL"
+    echo "✓ Download complete"
+else
+    echo "Using cached Claude Desktop installer"
+fi
+
+# Copy from cache to work directory
+cp "$CACHED_EXE" "$WORK_DIR/Claude-Setup-x64.exe"
 cd "$WORK_DIR"
-echo "📥 Downloading Claude Desktop installer..."
-run_as_user wget -O "Claude-Setup-x64.exe" "$CLAUDE_DOWNLOAD_URL"
-echo "✓ Download complete"
 
 # Extract resources
 echo "📦 Extracting resources..."
@@ -253,8 +286,9 @@ electron /usr/lib/claude-desktop/app.asar "\$@"
 EOF
 chmod +x "$INSTALL_DIR/bin/claude-desktop"
 
-# Create PKGBUILD
-cat > PKGBUILD << EOF
+# Create PKGBUILD in the correct location
+cd "$WORK_DIR"
+cat > "$WORK_DIR/PKGBUILD" << EOF
 # Maintainer: Claude Desktop Linux Maintainers
 pkgname=claude-desktop
 pkgver=$VERSION
@@ -263,8 +297,8 @@ pkgdesc="Claude Desktop for Linux"
 arch=('x86_64')
 url="https://www.anthropic.com"
 license=('custom')
-depends=('nodejs' 'npm' 'electron')
-makedepends=('nodejs-lts-hydrogen')
+depends=('electron')
+makedepends=('nodejs-lts-hydrogen' 'npm')
 source=()
 sha256sums=()
 
@@ -273,11 +307,11 @@ package() {
 }
 EOF
 
-chown "$REAL_USER:$REAL_USER" PKGBUILD
+# Ensure PKGBUILD has correct permissions
+chown "$REAL_USER:$REAL_USER" "$WORK_DIR/PKGBUILD"
 
 # Build package as real user
 echo "Building package as $REAL_USER..."
-cd "$WORK_DIR"
 run_as_user makepkg -f
 
 PACKAGE_FILE="claude-desktop-${VERSION}-1-x86_64.pkg.tar.zst"
