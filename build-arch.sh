@@ -24,10 +24,16 @@ done
 # Get the actual user when script is run with sudo
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+NVM_DIR="$REAL_HOME/.nvm"
 
-# Function to run commands as the real user
+# Function to run commands as the real user with proper environment
 run_as_user() {
-    sudo -u "$REAL_USER" "$@"
+    sudo -H -u "$REAL_USER" \
+    HOME="$REAL_HOME" \
+    USER="$REAL_USER" \
+    NVM_DIR="$NVM_DIR" \
+    PATH="$REAL_HOME/.nvm/versions/node/v20.18.1/bin:$PATH" \
+    "$@"
 }
 
 # Check for Arch Linux
@@ -98,39 +104,50 @@ check_system_node() {
 
 # Function to setup NVM and Node
 setup_node() {
-    # Check for NVM in the real user's home directory
     if [ -f "$REAL_HOME/.nvm/nvm.sh" ]; then
         echo "✓ NVM found in $REAL_HOME, using it for Node.js management"
         
         # Check for system nodejs if using NVM
         check_system_node
         
-        # Install and use Node.js 20 LTS
-        run_as_user bash -c "
-            export NVM_DIR=\"$REAL_HOME/.nvm\"
-            [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
-            nvm install 20
-            nvm use 20
-            # Verify we are using the correct version
-            node_version=\$(node -v)
-            if [[ \${node_version:1:2} -lt 20 ]]; then
-                echo \"❌ Failed to switch to Node.js 20 or higher\"
-                exit 1
-            fi
-            echo \"Using Node.js \$node_version\"
-        "
+        # Create a script to set up Node.js environment
+        cat > "$WORK_DIR/setup_node.sh" << 'EOF'
+#!/bin/bash
+export NVM_DIR="$REAL_HOME/.nvm"
+export HOME="$REAL_HOME"
+export USER="$REAL_USER"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+nvm install 20
+nvm use 20
+
+# Verify we are using the correct version
+node_version=$(node -v)
+if [[ ${node_version:1:2} -lt 20 ]]; then
+    echo "❌ Failed to switch to Node.js 20 or higher"
+    exit 1
+fi
+echo "Using Node.js $node_version"
+
+# Install asar globally if needed
+if ! npm list -g asar > /dev/null 2>&1; then
+    npm install -g asar
+fi
+EOF
+        
+        chmod +x "$WORK_DIR/setup_node.sh"
+        chown "$REAL_USER:$REAL_USER" "$WORK_DIR/setup_node.sh"
+        
+        # Run the node setup script as the real user
+        run_as_user "$WORK_DIR/setup_node.sh"
+        
+        # Export the node binary location for later use
+        export NODE_BIN="$REAL_HOME/.nvm/versions/node/$(run_as_user node -v | tr -d 'v')/bin"
+        export PATH="$NODE_BIN:$PATH"
     else
-        echo "NVM not found, installing node via pacman..."
+        echo "NVM not found in $REAL_HOME/.nvm, installing node via pacman..."
         # Install Node.js 20 from pacman
         pacman -S --noconfirm nodejs-lts-iron npm
-    fi
-    
-    # Check for electron packages and handle cleanup
-    ELECTRON_PKGS=($(pacman -Qq | grep '^electron[0-9]*
-    
-    # Install asar globally via npm
-    if ! npm list -g asar > /dev/null 2>&1; then
-        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && npm install -g asar'
     fi
 }
 
