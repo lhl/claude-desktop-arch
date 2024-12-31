@@ -98,25 +98,27 @@ check_system_node() {
 
 # Function to setup NVM and Node
 setup_node() {
-    if command -v nvm &> /dev/null; then
-        echo "✓ NVM found, using it for Node.js management"
+    # Check for NVM in the real user's home directory
+    if [ -f "$REAL_HOME/.nvm/nvm.sh" ]; then
+        echo "✓ NVM found in $REAL_HOME, using it for Node.js management"
         
         # Check for system nodejs if using NVM
         check_system_node
         
         # Install and use Node.js 20 LTS
-        run_as_user bash -c '
-            source $HOME/.nvm/nvm.sh
+        run_as_user bash -c "
+            export NVM_DIR=\"$REAL_HOME/.nvm\"
+            [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
             nvm install 20
             nvm use 20
             # Verify we are using the correct version
-            node_version=$(node -v)
-            if [[ ${node_version:1:2} -lt 20 ]]; then
-                echo "❌ Failed to switch to Node.js 20 or higher"
+            node_version=\$(node -v)
+            if [[ \${node_version:1:2} -lt 20 ]]; then
+                echo \"❌ Failed to switch to Node.js 20 or higher\"
                 exit 1
             fi
-            echo "Using Node.js $node_version"
-        '
+            echo \"Using Node.js \$node_version\"
+        "
     else
         echo "NVM not found, installing node via pacman..."
         # Install Node.js 20 from pacman
