@@ -168,8 +168,14 @@ mkdir -p electron-app
 cp "lib/net45/resources/app.asar" electron-app/
 cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
 
+# Ensure electron-app directory and contents are owned by real user
+chown -R "$REAL_USER:$REAL_USER" electron-app
+
 cd electron-app
 run_as_user npx asar extract app.asar app.asar.contents
+
+# Ensure extracted contents are owned by real user
+chown -R "$REAL_USER:$REAL_USER" app.asar.contents
 
 # Replace native module with stub implementation
 echo "Creating stub native module..."
