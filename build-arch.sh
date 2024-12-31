@@ -5,15 +5,19 @@ set -e
 CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
 VERSION="0.7.7"
 
+# Get the actual user when script is run with sudo
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
 # Check for Arch Linux
 if [ ! -f "/etc/arch-release" ]; then
     echo "❌ This script requires Arch Linux"
     exit 1
 fi
 
-# Check for root/sudo
+# Check for sudo
 if [ "$EUID" -ne 0 ]; then
-    echo "Please run with sudo to install dependencies"
+    echo "Please run this script with sudo"
     exit 1
 fi
 
@@ -32,11 +36,7 @@ check_command() {
     fi
 }
 
-# Check and install dependencies
-echo "Checking dependencies..."
-DEPS_TO_INSTALL=""
-
-# Function to check for 7z functionality (either p7zip or 7zip)
+# Function to check for 7z functionality
 check_7z() {
     if command -v 7z &> /dev/null || command -v p7zip &> /dev/null; then
         echo "✓ 7z functionality found"
@@ -47,6 +47,10 @@ check_7z() {
     fi
 }
 
+# Install dependencies
+echo "Checking dependencies..."
+DEPS_TO_INSTALL=""
+
 # Map commands to package names, excluding 7z which we'll handle separately
 declare -A package_map=(
     ["wget"]="wget"
@@ -56,7 +60,7 @@ declare -A package_map=(
     ["npx"]="nodejs npm"
 )
 
-# Check system package dependencies
+# Check for 7z
 if ! check_7z; then
     if pacman -Ss ^7zip$ > /dev/null 2>&1; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL 7zip"
@@ -65,6 +69,7 @@ if ! check_7z; then
     fi
 fi
 
+# Check other dependencies
 for cmd in wget wrestool icotool convert npx; do
     if ! check_command "$cmd"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL ${package_map[$cmd]}"
@@ -90,12 +95,19 @@ if ! check_command "electron"; then
     echo "Electron installed successfully"
 fi
 
+# Install asar if needed
+if ! npm list -g asar > /dev/null 2>&1; then
+    echo "Installing asar package globally..."
+    npm install -g asar
+fi
+
 # Create working directories
 WORK_DIR="$(pwd)/build"
 PKG_ROOT="$WORK_DIR/pkg"
 INSTALL_DIR="$PKG_ROOT/usr"
 
-# Clean previous build
+# Clean previous build and ensure proper permissions
+echo "Cleaning previous build..."
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 mkdir -p "$INSTALL_DIR/lib/claude-desktop"
@@ -103,46 +115,30 @@ mkdir -p "$INSTALL_DIR/share/applications"
 mkdir -p "$INSTALL_DIR/share/icons"
 mkdir -p "$INSTALL_DIR/bin"
 
-# Install asar if needed
-if ! npm list -g asar > /dev/null 2>&1; then
-    echo "Installing asar package globally..."
-    npm install -g asar
-fi
+# Set permissions for build directory
+chown -R "$REAL_USER:$REAL_USER" "$WORK_DIR"
 
-# Download Claude Windows installer
+# Function to run commands as the real user
+run_as_user() {
+    sudo -u "$REAL_USER" "$@"
+}
+
+# Download and process as real user
+cd "$WORK_DIR"
 echo "📥 Downloading Claude Desktop installer..."
-CLAUDE_EXE="$WORK_DIR/Claude-Setup-x64.exe"
-if ! wget -O "$CLAUDE_EXE" "$CLAUDE_DOWNLOAD_URL"; then
-    echo "❌ Failed to download Claude Desktop installer"
-    exit 1
-fi
+run_as_user wget -O "Claude-Setup-x64.exe" "$CLAUDE_DOWNLOAD_URL"
 echo "✓ Download complete"
 
 # Extract resources
 echo "📦 Extracting resources..."
-cd "$WORK_DIR"
-if ! 7z x -y "$CLAUDE_EXE"; then
-    echo "❌ Failed to extract installer"
-    exit 1
-fi
-
-if ! 7z x -y "AnthropicClaude-$VERSION-full.nupkg"; then
-    echo "❌ Failed to extract nupkg"
-    exit 1
-fi
+run_as_user 7z x -y "Claude-Setup-x64.exe"
+run_as_user 7z x -y "AnthropicClaude-$VERSION-full.nupkg"
 echo "✓ Resources extracted"
 
 # Extract and convert icons
 echo "🎨 Processing icons..."
-if ! wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico; then
-    echo "❌ Failed to extract icons from exe"
-    exit 1
-fi
-
-if ! icotool -x claude.ico; then
-    echo "❌ Failed to convert icons"
-    exit 1
-fi
+run_as_user wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico
+run_as_user icotool -x claude.ico
 echo "✓ Icons processed"
 
 # Map icon sizes to their corresponding extracted files
@@ -173,7 +169,7 @@ cp "lib/net45/resources/app.asar" electron-app/
 cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
 
 cd electron-app
-npx asar extract app.asar app.asar.contents
+run_as_user npx asar extract app.asar app.asar.contents
 
 # Replace native module with stub implementation
 echo "Creating stub native module..."
@@ -219,12 +215,14 @@ module.exports = {
 };
 EOF
 
+chown -R "$REAL_USER:$REAL_USER" app.asar.contents
+
 # Copy Tray icons
 mkdir -p app.asar.contents/resources
 cp ../lib/net45/resources/Tray* app.asar.contents/resources/
 
 # Repackage app.asar
-npx asar pack app.asar.contents app.asar
+run_as_user npx asar pack app.asar.contents app.asar
 
 # Copy app files
 cp app.asar "$INSTALL_DIR/lib/claude-desktop/"
@@ -249,10 +247,6 @@ electron /usr/lib/claude-desktop/app.asar "\$@"
 EOF
 chmod +x "$INSTALL_DIR/bin/claude-desktop"
 
-# Create package with makepkg
-echo "📦 Creating Arch package..."
-cd "$WORK_DIR"
-
 # Create PKGBUILD
 cat > PKGBUILD << EOF
 # Maintainer: Claude Desktop Linux Maintainers
@@ -263,7 +257,7 @@ pkgdesc="Claude Desktop for Linux"
 arch=('x86_64')
 url="https://www.anthropic.com"
 license=('custom')
-depends=('nodejs' 'npm' 'p7zip' 'electron')
+depends=('nodejs' 'npm' 'electron')
 makedepends=('nodejs-lts-hydrogen')
 source=()
 sha256sums=()
@@ -273,11 +267,12 @@ package() {
 }
 EOF
 
-# Build package
-if ! makepkg -f; then
-    echo "❌ Failed to build package"
-    exit 1
-fi
+chown "$REAL_USER:$REAL_USER" PKGBUILD
+
+# Build package as real user
+echo "Building package as $REAL_USER..."
+cd "$WORK_DIR"
+run_as_user makepkg -f
 
 PACKAGE_FILE="claude-desktop-${VERSION}-1-x86_64.pkg.tar.zst"
 if [ -f "$PACKAGE_FILE" ]; then
