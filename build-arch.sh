@@ -1,11 +1,18 @@
 #!/bin/bash
 set -e
 
+########################################
+# Configuration
+########################################
+
 # Update this URL when a new version of Claude Desktop is released
 CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
 VERSION="0.7.7"
 
+########################################
 # Parse command line arguments
+########################################
+
 FORCE_DOWNLOAD=false
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -21,20 +28,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Get the actual user when script is run with sudo
+########################################
+# Identify real user
+########################################
+
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 NVM_DIR="$REAL_HOME/.nvm"
 
-# Function to run commands as the real user with proper environment
+########################################
+# Sudo helper for general commands
+########################################
+
 run_as_user() {
-    sudo -H -u "$REAL_USER" \
-    HOME="$REAL_HOME" \
-    USER="$REAL_USER" \
-    NVM_DIR="$NVM_DIR" \
-    PATH="$REAL_HOME/.nvm/versions/node/v20.18.1/bin:$PATH" \
-    "$@"
+    sudo -H -u "$REAL_USER" HOME="$REAL_HOME" USER="$REAL_USER" "$@"
 }
+
+########################################
+# Sudo helper that sources NVM + Node
+########################################
+
+run_as_user_nvm() {
+    # We run as the real user, then inside that user shell we export NVM_DIR,
+    # source nvm, ensure Node 20 is installed/used, then run the requested command.
+    sudo -E -H -u "$REAL_USER" bash -c "
+        export HOME=\"$REAL_HOME\"
+        export USER=\"$REAL_USER\"
+        export NVM_DIR=\"$NVM_DIR\"
+        # shellcheck source=/dev/null
+        [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"
+        nvm install 20
+        nvm use 20
+        $*
+    "
+}
+
+########################################
+# Preliminary checks
+########################################
 
 # Check for Arch Linux
 if [ ! -f "/etc/arch-release" ]; then
@@ -50,11 +81,24 @@ fi
 
 # Print system information
 echo "System Information:"
-echo "Distribution: $(cat /etc/os-release | grep "PRETTY_NAME" | cut -d'"' -f2)"
+echo "Distribution: $(grep 'PRETTY_NAME' /etc/os-release | cut -d'\"' -f2)"
 
-# Function to check if a command exists
+# Check for NVM
+if [ ! -f "$NVM_DIR/nvm.sh" ]; then
+    echo "❌ NVM is required but not found in $NVM_DIR"
+    echo "Please install NVM first by following:"
+    echo "  https://github.com/nvm-sh/nvm#installing-and-updating"
+    echo "Then run this script again."
+    exit 1
+fi
+echo "✓ NVM found in $REAL_HOME"
+
+########################################
+# Function: check if a command exists
+########################################
+
 check_command() {
-    if ! command -v "$1" &> /dev/null; then
+    if ! command -v "$1" &>/dev/null; then
         echo "❌ $1 not found"
         return 1
     else
@@ -63,9 +107,12 @@ check_command() {
     fi
 }
 
-# Function to check for 7z functionality
+########################################
+# Function: check 7z
+########################################
+
 check_7z() {
-    if command -v 7z &> /dev/null || command -v p7zip &> /dev/null; then
+    if command -v 7z &>/dev/null || command -v p7zip &>/dev/null; then
         echo "✓ 7z functionality found"
         return 0
     else
@@ -74,7 +121,11 @@ check_7z() {
     fi
 }
 
-# Function to check for system nodejs
+########################################
+# Function: check for system nodejs
+# (Warn user if installed, since nvm is recommended)
+########################################
+
 check_system_node() {
     local node_pkgs=(nodejs npm nodejs-lts-hydrogen nodejs-lts-iron)
     local installed_pkgs=()
@@ -102,60 +153,16 @@ check_system_node() {
     fi
 }
 
-# Function to setup NVM and Node
-setup_node() {
-    if [ -f "$REAL_HOME/.nvm/nvm.sh" ]; then
-        echo "✓ NVM found in $REAL_HOME, using it for Node.js management"
-        
-        # Check for system nodejs if using NVM
-        check_system_node
-        
-        # Create a script to set up Node.js environment
-        cat > "$WORK_DIR/setup_node.sh" << 'EOF'
-#!/bin/bash
-export NVM_DIR="$REAL_HOME/.nvm"
-export HOME="$REAL_HOME"
-export USER="$REAL_USER"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+########################################
+# Perform system checks
+########################################
 
-nvm install 20
-nvm use 20
+check_system_node
 
-# Verify we are using the correct version
-node_version=$(node -v)
-if [[ ${node_version:1:2} -lt 20 ]]; then
-    echo "❌ Failed to switch to Node.js 20 or higher"
-    exit 1
-fi
-echo "Using Node.js $node_version"
-
-# Install asar globally if needed
-if ! npm list -g asar > /dev/null 2>&1; then
-    npm install -g asar
-fi
-EOF
-        
-        chmod +x "$WORK_DIR/setup_node.sh"
-        chown "$REAL_USER:$REAL_USER" "$WORK_DIR/setup_node.sh"
-        
-        # Run the node setup script as the real user
-        run_as_user "$WORK_DIR/setup_node.sh"
-        
-        # Export the node binary location for later use
-        export NODE_BIN="$REAL_HOME/.nvm/versions/node/$(run_as_user node -v | tr -d 'v')/bin"
-        export PATH="$NODE_BIN:$PATH"
-    else
-        echo "NVM not found in $REAL_HOME/.nvm, installing node via pacman..."
-        # Install Node.js 20 from pacman
-        pacman -S --noconfirm nodejs-lts-iron npm
-    fi
-}
-
-# Install dependencies
 echo "Checking dependencies..."
 DEPS_TO_INSTALL=""
 
-# Map commands to package names, excluding 7z which we'll handle separately
+# Map commands to package names (excluding 7z logic)
 declare -A package_map=(
     ["wget"]="wget"
     ["wrestool"]="icoutils"
@@ -163,39 +170,38 @@ declare -A package_map=(
     ["convert"]="imagemagick"
 )
 
-# Check for 7z
+# Check 7z
 if ! check_7z; then
-    if pacman -Ss ^7zip$ > /dev/null 2>&1; then
+    if pacman -Ss ^7zip$ &>/dev/null; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL 7zip"
     else
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL p7zip"
     fi
 fi
 
-# Check other dependencies
+# Check other commands
 for cmd in wget wrestool icotool convert; do
     if ! check_command "$cmd"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL ${package_map[$cmd]}"
     fi
 done
 
-# Install system dependencies if any
-if [ ! -z "$DEPS_TO_INSTALL" ]; then
+# Install system dependencies if needed
+if [ -n "$DEPS_TO_INSTALL" ]; then
     echo "Installing system dependencies: $DEPS_TO_INSTALL"
     pacman -Sy --noconfirm $DEPS_TO_INSTALL
     echo "System dependencies installed successfully"
 fi
 
-# Setup Node.js environment
-setup_node
+########################################
+# Create directories
+########################################
 
-# Create working directories
 WORK_DIR="$(pwd)/build"
 PKG_ROOT="$WORK_DIR/pkg"
 INSTALL_DIR="$PKG_ROOT/usr"
 CACHE_DIR="$(pwd)/cache"
 
-# Clean previous build but keep cache
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 mkdir -p "$INSTALL_DIR/lib/claude-desktop"
@@ -204,11 +210,13 @@ mkdir -p "$INSTALL_DIR/share/icons"
 mkdir -p "$INSTALL_DIR/bin"
 mkdir -p "$CACHE_DIR"
 
-# Set permissions
 chown -R "$REAL_USER:$REAL_USER" "$WORK_DIR"
 chown -R "$REAL_USER:$REAL_USER" "$CACHE_DIR"
 
-# Download logic with caching
+########################################
+# Download with caching
+########################################
+
 CACHED_EXE="$CACHE_DIR/Claude-Setup-x64.exe"
 if [[ "$FORCE_DOWNLOAD" = true ]] || [[ ! -f "$CACHED_EXE" ]]; then
     echo "📥 Downloading Claude Desktop installer..."
@@ -218,23 +226,28 @@ else
     echo "Using cached Claude Desktop installer"
 fi
 
-# Copy from cache to work directory
+# Copy from cache to build dir
 cp "$CACHED_EXE" "$WORK_DIR/Claude-Setup-x64.exe"
 cd "$WORK_DIR"
 
-# Extract resources
+########################################
+# Extract resources using run_as_user
+########################################
+
 echo "📦 Extracting resources..."
 run_as_user 7z x -y "Claude-Setup-x64.exe"
 run_as_user 7z x -y "AnthropicClaude-$VERSION-full.nupkg"
 echo "✓ Resources extracted"
 
+########################################
 # Extract and convert icons
+########################################
+
 echo "🎨 Processing icons..."
 run_as_user wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico
 run_as_user icotool -x claude.ico
 echo "✓ Icons processed"
 
-# Map icon sizes to their corresponding extracted files
 declare -A icon_files=(
     ["16"]="claude_13_16x16x32.png"
     ["24"]="claude_11_24x24x32.png"
@@ -244,7 +257,6 @@ declare -A icon_files=(
     ["256"]="claude_6_256x256x32.png"
 )
 
-# Install icons
 for size in 16 24 32 48 64 256; do
     icon_dir="$INSTALL_DIR/share/icons/hicolor/${size}x${size}/apps"
     mkdir -p "$icon_dir"
@@ -256,23 +268,24 @@ for size in 16 24 32 48 64 256; do
     fi
 done
 
-# Process app.asar
+########################################
+# Prepare electron app
+########################################
+
 mkdir -p electron-app
 cp "lib/net45/resources/app.asar" electron-app/
 cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
-
-# Ensure electron-app directory and contents are owned by real user
 chown -R "$REAL_USER:$REAL_USER" electron-app
 
 cd electron-app
-run_as_user npx asar extract app.asar app.asar.contents
 
-# Ensure extracted contents are owned by real user
+# Now extract app.asar using npx in the real-user nvm environment
+run_as_user_nvm "npx asar extract app.asar app.asar.contents"
 chown -R "$REAL_USER:$REAL_USER" app.asar.contents
 
-# Replace native module with stub implementation
+# Replace the claude-native module with a stub
 echo "Creating stub native module..."
-cat > app.asar.contents/node_modules/claude-native/index.js << EOF
+cat > app.asar.contents/node_modules/claude-native/index.js << 'EOF'
 // Stub implementation of claude-native using KeyboardKey enum values
 const KeyboardKey = {
   Backspace: 43,
@@ -316,18 +329,21 @@ EOF
 
 chown -R "$REAL_USER:$REAL_USER" app.asar.contents
 
-# Copy Tray icons
+# Copy tray icons
 mkdir -p app.asar.contents/resources
-cp ../lib/net45/resources/Tray* app.asar.contents/resources/
+cp ../lib/net45/resources/Tray* app.asar.contents/resources/ || true
 
 # Repackage app.asar
-run_as_user npx asar pack app.asar.contents app.asar
+run_as_user_nvm "npx asar pack app.asar.contents app.asar"
 
-# Copy app files
+# Move final asar into the correct location
 cp app.asar "$INSTALL_DIR/lib/claude-desktop/"
 cp -r app.asar.unpacked "$INSTALL_DIR/lib/claude-desktop/"
 
-# Create desktop entry
+########################################
+# Desktop entry and launcher
+########################################
+
 cat > "$INSTALL_DIR/share/applications/claude-desktop.desktop" << EOF
 [Desktop Entry]
 Name=Claude
@@ -339,14 +355,16 @@ Categories=Office;Utility;
 MimeType=x-scheme-handler/claude;
 EOF
 
-# Create launcher script
-cat > "$INSTALL_DIR/bin/claude-desktop" << EOF
+cat > "$INSTALL_DIR/bin/claude-desktop" << 'EOF'
 #!/bin/bash
-electron /usr/lib/claude-desktop/app.asar "\$@"
+electron /usr/lib/claude-desktop/app.asar "$@"
 EOF
 chmod +x "$INSTALL_DIR/bin/claude-desktop"
 
-# Create PKGBUILD in the correct location
+########################################
+# Create PKGBUILD
+########################################
+
 cd "$WORK_DIR"
 cat > "$WORK_DIR/PKGBUILD" << EOF
 # Maintainer: Claude Desktop Linux Maintainers
@@ -357,8 +375,7 @@ pkgdesc="Claude Desktop for Linux"
 arch=('x86_64')
 url="https://www.anthropic.com"
 license=('custom')
-depends=('electron33')
-makedepends=('nodejs-lts-hydrogen' 'npm')
+depends=('electron')
 source=()
 sha256sums=()
 
@@ -367,273 +384,12 @@ package() {
 }
 EOF
 
-# Ensure PKGBUILD has correct permissions
 chown "$REAL_USER:$REAL_USER" "$WORK_DIR/PKGBUILD"
 
-# Build package as real user
-echo "Building package as $REAL_USER..."
-run_as_user makepkg -f
+########################################
+# Build package
+########################################
 
-PACKAGE_FILE="claude-desktop-${VERSION}-1-x86_64.pkg.tar.zst"
-if [ -f "$PACKAGE_FILE" ]; then
-    echo "✓ Package built successfully at: $PACKAGE_FILE"
-    echo "🎉 Done! You can now install the package with: sudo pacman -U $PACKAGE_FILE"
-else
-    echo "❌ Package file not found at expected location: $PACKAGE_FILE"
-    exit 1
-fi))
-    if [ ${#ELECTRON_PKGS[@]} -gt 0 ]; then
-        echo "⚠️  Found multiple electron packages installed:"
-        printf "   %s\n" "${ELECTRON_PKGS[@]}"
-        echo "For best compatibility, we recommend using only the latest version."
-        echo "Current packages: ${ELECTRON_PKGS[*]}"
-        echo ""
-        read -p "Would you like to clean up older electron versions? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            # Keep only the latest version (last in sorted array)
-            LATEST=${ELECTRON_PKGS[-1]}
-            for pkg in "${ELECTRON_PKGS[@]}"; do
-                if [ "$pkg" != "$LATEST" ]; then
-                    pacman -Rns --noconfirm "$pkg"
-                fi
-            done
-            echo "✓ Cleaned up older electron versions"
-        fi
-    fi
-    
-    # Remove stray electron symlink if it exists and isn't owned by a package
-    if [ -L "/usr/bin/electron" ] && ! pacman -Qo /usr/bin/electron &>/dev/null; then
-        echo "Found stray electron symlink, removing..."
-        rm -f /usr/bin/electron
-    fi
-    
-    # Install asar globally via npm
-    if ! npm list -g asar > /dev/null 2>&1; then
-        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && npm install -g asar'
-    fi
-}
-
-# Install dependencies
-echo "Checking dependencies..."
-DEPS_TO_INSTALL=""
-
-# Map commands to package names, excluding 7z which we'll handle separately
-declare -A package_map=(
-    ["wget"]="wget"
-    ["wrestool"]="icoutils"
-    ["icotool"]="icoutils"
-    ["convert"]="imagemagick"
-)
-
-# Check for 7z
-if ! check_7z; then
-    if pacman -Ss ^7zip$ > /dev/null 2>&1; then
-        DEPS_TO_INSTALL="$DEPS_TO_INSTALL 7zip"
-    else
-        DEPS_TO_INSTALL="$DEPS_TO_INSTALL p7zip"
-    fi
-fi
-
-# Check other dependencies
-for cmd in wget wrestool icotool convert; do
-    if ! check_command "$cmd"; then
-        DEPS_TO_INSTALL="$DEPS_TO_INSTALL ${package_map[$cmd]}"
-    fi
-done
-
-# Install system dependencies if any
-if [ ! -z "$DEPS_TO_INSTALL" ]; then
-    echo "Installing system dependencies: $DEPS_TO_INSTALL"
-    pacman -Sy --noconfirm $DEPS_TO_INSTALL
-    echo "System dependencies installed successfully"
-fi
-
-# Setup Node.js environment
-setup_node
-
-# Create working directories
-WORK_DIR="$(pwd)/build"
-PKG_ROOT="$WORK_DIR/pkg"
-INSTALL_DIR="$PKG_ROOT/usr"
-CACHE_DIR="$(pwd)/cache"
-
-# Clean previous build but keep cache
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR"
-mkdir -p "$INSTALL_DIR/lib/claude-desktop"
-mkdir -p "$INSTALL_DIR/share/applications"
-mkdir -p "$INSTALL_DIR/share/icons"
-mkdir -p "$INSTALL_DIR/bin"
-mkdir -p "$CACHE_DIR"
-
-# Set permissions
-chown -R "$REAL_USER:$REAL_USER" "$WORK_DIR"
-chown -R "$REAL_USER:$REAL_USER" "$CACHE_DIR"
-
-# Download logic with caching
-CACHED_EXE="$CACHE_DIR/Claude-Setup-x64.exe"
-if [[ "$FORCE_DOWNLOAD" = true ]] || [[ ! -f "$CACHED_EXE" ]]; then
-    echo "📥 Downloading Claude Desktop installer..."
-    run_as_user wget -O "$CACHED_EXE" "$CLAUDE_DOWNLOAD_URL"
-    echo "✓ Download complete"
-else
-    echo "Using cached Claude Desktop installer"
-fi
-
-# Copy from cache to work directory
-cp "$CACHED_EXE" "$WORK_DIR/Claude-Setup-x64.exe"
-cd "$WORK_DIR"
-
-# Extract resources
-echo "📦 Extracting resources..."
-run_as_user 7z x -y "Claude-Setup-x64.exe"
-run_as_user 7z x -y "AnthropicClaude-$VERSION-full.nupkg"
-echo "✓ Resources extracted"
-
-# Extract and convert icons
-echo "🎨 Processing icons..."
-run_as_user wrestool -x -t 14 "lib/net45/claude.exe" -o claude.ico
-run_as_user icotool -x claude.ico
-echo "✓ Icons processed"
-
-# Map icon sizes to their corresponding extracted files
-declare -A icon_files=(
-    ["16"]="claude_13_16x16x32.png"
-    ["24"]="claude_11_24x24x32.png"
-    ["32"]="claude_10_32x32x32.png"
-    ["48"]="claude_8_48x48x32.png"
-    ["64"]="claude_7_64x64x32.png"
-    ["256"]="claude_6_256x256x32.png"
-)
-
-# Install icons
-for size in 16 24 32 48 64 256; do
-    icon_dir="$INSTALL_DIR/share/icons/hicolor/${size}x${size}/apps"
-    mkdir -p "$icon_dir"
-    if [ -f "${icon_files[$size]}" ]; then
-        echo "Installing ${size}x${size} icon..."
-        install -Dm 644 "${icon_files[$size]}" "$icon_dir/claude-desktop.png"
-    else
-        echo "Warning: Missing ${size}x${size} icon"
-    fi
-done
-
-# Process app.asar
-mkdir -p electron-app
-cp "lib/net45/resources/app.asar" electron-app/
-cp -r "lib/net45/resources/app.asar.unpacked" electron-app/
-
-# Ensure electron-app directory and contents are owned by real user
-chown -R "$REAL_USER:$REAL_USER" electron-app
-
-cd electron-app
-run_as_user npx asar extract app.asar app.asar.contents
-
-# Ensure extracted contents are owned by real user
-chown -R "$REAL_USER:$REAL_USER" app.asar.contents
-
-# Replace native module with stub implementation
-echo "Creating stub native module..."
-cat > app.asar.contents/node_modules/claude-native/index.js << EOF
-// Stub implementation of claude-native using KeyboardKey enum values
-const KeyboardKey = {
-  Backspace: 43,
-  Tab: 280,
-  Enter: 261,
-  Shift: 272,
-  Control: 61,
-  Alt: 40,
-  CapsLock: 56,
-  Escape: 85,
-  Space: 276,
-  PageUp: 251,
-  PageDown: 250,
-  End: 83,
-  Home: 154,
-  LeftArrow: 175,
-  UpArrow: 282,
-  RightArrow: 262,
-  DownArrow: 81,
-  Delete: 79,
-  Meta: 187
-};
-
-Object.freeze(KeyboardKey);
-
-module.exports = {
-  getWindowsVersion: () => "10.0.0",
-  setWindowEffect: () => {},
-  removeWindowEffect: () => {},
-  getIsMaximized: () => false,
-  flashFrame: () => {},
-  clearFlashFrame: () => {},
-  showNotification: () => {},
-  setProgressBar: () => {},
-  clearProgressBar: () => {},
-  setOverlayIcon: () => {},
-  clearOverlayIcon: () => {},
-  KeyboardKey
-};
-EOF
-
-chown -R "$REAL_USER:$REAL_USER" app.asar.contents
-
-# Copy Tray icons
-mkdir -p app.asar.contents/resources
-cp ../lib/net45/resources/Tray* app.asar.contents/resources/
-
-# Repackage app.asar
-run_as_user npx asar pack app.asar.contents app.asar
-
-# Copy app files
-cp app.asar "$INSTALL_DIR/lib/claude-desktop/"
-cp -r app.asar.unpacked "$INSTALL_DIR/lib/claude-desktop/"
-
-# Create desktop entry
-cat > "$INSTALL_DIR/share/applications/claude-desktop.desktop" << EOF
-[Desktop Entry]
-Name=Claude
-Exec=claude-desktop %u
-Icon=claude-desktop
-Type=Application
-Terminal=false
-Categories=Office;Utility;
-MimeType=x-scheme-handler/claude;
-EOF
-
-# Create launcher script
-cat > "$INSTALL_DIR/bin/claude-desktop" << EOF
-#!/bin/bash
-electron /usr/lib/claude-desktop/app.asar "\$@"
-EOF
-chmod +x "$INSTALL_DIR/bin/claude-desktop"
-
-# Create PKGBUILD in the correct location
-cd "$WORK_DIR"
-cat > "$WORK_DIR/PKGBUILD" << EOF
-# Maintainer: Claude Desktop Linux Maintainers
-pkgname=claude-desktop
-pkgver=$VERSION
-pkgrel=1
-pkgdesc="Claude Desktop for Linux"
-arch=('x86_64')
-url="https://www.anthropic.com"
-license=('custom')
-depends=('nodejs')
-makedepends=('nodejs-lts-hydrogen' 'npm')
-source=()
-sha256sums=()
-
-package() {
-    cp -r $PKG_ROOT/* "\$pkgdir/"
-}
-EOF
-
-# Ensure PKGBUILD has correct permissions
-chown "$REAL_USER:$REAL_USER" "$WORK_DIR/PKGBUILD"
-
-# Build package as real user
 echo "Building package as $REAL_USER..."
 run_as_user makepkg -f
 
