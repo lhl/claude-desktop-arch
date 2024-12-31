@@ -336,9 +336,13 @@ cp ../lib/net45/resources/Tray* app.asar.contents/resources/ || true
 # Repackage app.asar
 run_as_user_nvm "npx asar pack app.asar.contents app.asar"
 
-# Move final asar into the correct location
+# Copy the final asar and unpacked files
 cp app.asar "$INSTALL_DIR/lib/claude-desktop/"
 cp -r app.asar.unpacked "$INSTALL_DIR/lib/claude-desktop/"
+
+# fix ownership so fakeroot can read them
+chown -R "$REAL_USER:$REAL_USER" "$INSTALL_DIR/lib/claude-desktop"
+
 
 ########################################
 # Desktop entry and launcher
@@ -396,7 +400,7 @@ run_as_user makepkg -f
 PACKAGE_FILE="claude-desktop-${VERSION}-1-x86_64.pkg.tar.zst"
 if [ -f "$PACKAGE_FILE" ]; then
     echo "✓ Package built successfully at: $PACKAGE_FILE"
-    echo "🎉 Done! You can now install the package with: sudo pacman -U $PACKAGE_FILE"
+    echo "🎉 Done! You can now install the package with: sudo pacman -U build/$PACKAGE_FILE"
 else
     echo "❌ Package file not found at expected location: $PACKAGE_FILE"
     exit 1
