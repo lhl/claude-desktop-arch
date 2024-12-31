@@ -36,9 +36,19 @@ check_command() {
 echo "Checking dependencies..."
 DEPS_TO_INSTALL=""
 
-# Map Debian package names to Arch Linux package names
+# Function to check for 7z functionality (either p7zip or 7zip)
+check_7z() {
+    if command -v 7z &> /dev/null || command -v p7zip &> /dev/null; then
+        echo "✓ 7z functionality found"
+        return 0
+    else
+        echo "❌ 7z functionality not found"
+        return 1
+    fi
+}
+
+# Map commands to package names, excluding 7z which we'll handle separately
 declare -A package_map=(
-    ["p7zip"]="p7zip"
     ["wget"]="wget"
     ["wrestool"]="icoutils"
     ["icotool"]="icoutils"
@@ -47,7 +57,15 @@ declare -A package_map=(
 )
 
 # Check system package dependencies
-for cmd in p7zip wget wrestool icotool convert npx; do
+if ! check_7z; then
+    if pacman -Ss ^7zip$ > /dev/null 2>&1; then
+        DEPS_TO_INSTALL="$DEPS_TO_INSTALL 7zip"
+    else
+        DEPS_TO_INSTALL="$DEPS_TO_INSTALL p7zip"
+    fi
+fi
+
+for cmd in wget wrestool icotool convert npx; do
     if ! check_command "$cmd"; then
         DEPS_TO_INSTALL="$DEPS_TO_INSTALL ${package_map[$cmd]}"
     fi
