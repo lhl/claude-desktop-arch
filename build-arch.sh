@@ -25,6 +25,11 @@ done
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
+# Function to run commands as the real user
+run_as_user() {
+    sudo -u "$REAL_USER" "$@"
+}
+
 # Check for Arch Linux
 if [ ! -f "/etc/arch-release" ]; then
     echo "❌ This script requires Arch Linux"
@@ -63,21 +68,62 @@ check_7z() {
     fi
 }
 
+# Function to check for system nodejs
+check_system_node() {
+    local node_pkgs=(nodejs npm nodejs-lts-hydrogen)
+    local installed_pkgs=()
+    
+    for pkg in "${node_pkgs[@]}"; do
+        if pacman -Qi "$pkg" &>/dev/null; then
+            installed_pkgs+=("$pkg")
+        fi
+    done
+    
+    if [ ${#installed_pkgs[@]} -gt 0 ]; then
+        echo "⚠️  Warning: Found system Node.js packages installed while using NVM:"
+        printf "   %s\n" "${installed_pkgs[@]}"
+        echo "It's recommended to remove them to avoid conflicts:"
+        echo "   sudo pacman -Rns ${installed_pkgs[*]}"
+        echo ""
+        read -p "Would you like to remove them now? [y/N] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            pacman -Rns "${installed_pkgs[@]}"
+            echo "✓ System Node.js packages removed"
+        else
+            echo "Continuing with system packages installed..."
+        fi
+    fi
+}
+
 # Function to setup NVM and Node
 setup_node() {
-    # Source NVM if it exists
-    [ -s "$REAL_HOME/.nvm/nvm.sh" ] && \. "$REAL_HOME/.nvm/nvm.sh"
-    
     if command -v nvm &> /dev/null; then
         echo "✓ NVM found, using it for Node.js management"
-        # Install and use the LTS version
-        run_as_user bash -c 'source $HOME/.nvm/nvm.sh && nvm install --lts && nvm use --lts'
+        
+        # Check for system nodejs if using NVM
+        check_system_node
+        
+        # Ensure we're using a recent LTS version (18.x or higher)
+        run_as_user bash -c '
+            source $HOME/.nvm/nvm.sh
+            nvm install 18
+            nvm use 18
+            # Verify we are using the correct version
+            node_version=$(node -v)
+            if [[ ${node_version:1:2} -lt 18 ]]; then
+                echo "❌ Failed to switch to Node.js 18 or higher"
+                exit 1
+            fi
+            echo "Using Node.js $node_version"
+        '
     else
         echo "NVM not found, installing node via pacman..."
         pacman -S --noconfirm nodejs npm nodejs-lts-hydrogen
     fi
     
     # Install global npm packages
+    # Note: We need to source nvm in each command to ensure we're using the right version
     if ! npm list -g electron > /dev/null 2>&1; then
         run_as_user bash -c 'source $HOME/.nvm/nvm.sh && npm install -g electron'
     fi
@@ -142,11 +188,6 @@ mkdir -p "$CACHE_DIR"
 # Set permissions
 chown -R "$REAL_USER:$REAL_USER" "$WORK_DIR"
 chown -R "$REAL_USER:$REAL_USER" "$CACHE_DIR"
-
-# Function to run commands as the real user
-run_as_user() {
-    sudo -u "$REAL_USER" "$@"
-}
 
 # Download logic with caching
 CACHED_EXE="$CACHE_DIR/Claude-Setup-x64.exe"
