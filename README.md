@@ -1,3 +1,11 @@
+This was a quick and dirty fork/hack to see if I could get this script adapted for Arch Linux. Of course I started with using Claude Sonnet 3.5 New adapt this and it looked like we were getting close, but Claude continues to not do editing very well, and it ended up being a rats nest. I subsequently sent this through ChatGPT o1 and it managed to whip the script into shape and is much cleaner.
+
+- I use [nvm](https://github.com/nvm-sh/nvm) for my Node.js/npm management (and so should you?) and this script is adapted to require that
+- I have lots of Electron versions installed (`electron`, `electron23`, `electron32`, `electron33`, etc) and it seems to work OK
+
+# ORIGINAL README:
+---
+
 ***THIS IS AN UNOFFICIAL BUILD SCRIPT!***
 
 If you run into an issue with this build script, make an issue here. Don't bug Anthropic about it - they already have enough on their plates.
