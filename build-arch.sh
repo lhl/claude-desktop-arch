@@ -140,6 +140,7 @@ check_system_node() {
         echo "⚠️  Warning: Found system Node.js packages installed while using NVM:"
         printf "   %s\n" "${installed_pkgs[@]}"
         echo "It's recommended to remove them to avoid conflicts:"
+        echo
         echo "   sudo pacman -Rns ${installed_pkgs[*]}"
         echo ""
         read -p "Would you like to remove them now? [y/N] " -n 1 -r
@@ -397,10 +398,12 @@ chown "$REAL_USER:$REAL_USER" "$WORK_DIR/PKGBUILD"
 echo "Building package as $REAL_USER..."
 run_as_user makepkg -f
 
-PACKAGE_FILE="claude-desktop-${VERSION}-1-x86_64.pkg.tar.zst"
+PACKAGE_FILE="claude-desktop-bin-${VERSION}-1-x86_64.pkg.tar.zst"
 if [ -f "$PACKAGE_FILE" ]; then
     echo "✓ Package built successfully at: $PACKAGE_FILE"
-    echo "🎉 Done! You can now install the package with: sudo pacman -U build/$PACKAGE_FILE"
+    echo "🎉 Done! You can now install the package with:"
+    echo
+    echo "  sudo pacman -U build/$PACKAGE_FILE"
 else
     echo "❌ Package file not found at expected location: $PACKAGE_FILE"
     exit 1
