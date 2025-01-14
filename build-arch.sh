@@ -372,7 +372,7 @@ chmod +x "$INSTALL_DIR/bin/claude-desktop"
 cd "$WORK_DIR"
 cat > "$WORK_DIR/PKGBUILD" << EOF
 # Maintainer: Claude Desktop Linux Maintainers
-pkgname=claude-desktop
+pkgname=claude-desktop-bin
 pkgver=$VERSION
 pkgrel=1
 pkgdesc="Claude Desktop for Linux"
